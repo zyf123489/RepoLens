@@ -30,38 +30,22 @@ impl Store {
         let mut stmt = self
             .connection
             .prepare("SELECT id,path,alias,group_name,kind,policy FROM entries ORDER BY rowid")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-            ))
-        })?;
+        let mut rows = stmt.query([])?;
         let mut entries = Vec::new();
-        for row in rows {
-            let (id, path, alias, group, kind, policy) = row?;
-            let policy = serde_json::from_str(&policy).map_err(|_| {
-                AppError::new("policy_data", "已保存规则无法读取，未将其当作空规则。")
-            })?;
-            entries.push(Entry {
-                id,
-                path,
-                alias,
-                group,
-                kind,
-                policy,
-            });
+        while let Some(row) = rows.next()? {
+            entries.push(entry_from_row(row)?);
         }
         Ok(entries)
     }
     pub fn entry(&self, id: &str) -> Result<Entry> {
-        self.entries()?
-            .into_iter()
-            .find(|e| e.id == id)
-            .ok_or_else(|| AppError::new("entry", "条目不存在或已移出列表。"))
+        let mut stmt = self
+            .connection
+            .prepare("SELECT id,path,alias,group_name,kind,policy FROM entries WHERE id=?1")?;
+        let mut rows = stmt.query([id])?;
+        let row = rows
+            .next()?
+            .ok_or_else(|| AppError::new("entry", "条目不存在或已移出列表。"))?;
+        entry_from_row(row)
     }
     pub fn add(&self, ctx: &Context) -> Result<Entry> {
         if let Some(entry) = self
@@ -153,4 +137,18 @@ impl Store {
         self.connection.execute("INSERT INTO settings VALUES('git',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [value])?;
         Ok(())
     }
+}
+
+fn entry_from_row(row: &rusqlite::Row<'_>) -> Result<Entry> {
+    let policy: String = row.get(5)?;
+    let policy = serde_json::from_str(&policy)
+        .map_err(|_| AppError::new("policy_data", "已保存规则无法读取，未将其当作空规则。"))?;
+    Ok(Entry {
+        id: row.get(0)?,
+        path: row.get(1)?,
+        alias: row.get(2)?,
+        group: row.get(3)?,
+        kind: row.get(4)?,
+        policy,
+    })
 }

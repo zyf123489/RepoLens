@@ -148,10 +148,7 @@ impl Service {
     }
     pub fn scan_start(&self, options: ScanOptions) -> Result<String> {
         let mut jobs = self.scans.lock().unwrap();
-        if jobs
-            .values()
-            .any(|j| j.state.lock().unwrap().state == "running")
-        {
+        if jobs.values().any(|j| j.snapshot().state == "running") {
             return Err(AppError::new(
                 "scan_busy",
                 "已有扫描正在执行，请先停止或等待完成。",
@@ -159,7 +156,7 @@ impl Service {
         }
         jobs.clear();
         let job = scan::start(self.git(), options)?;
-        let id = job.state.lock().unwrap().id.clone();
+        let id = job.snapshot().id;
         jobs.insert(id.clone(), job);
         Ok(id)
     }
@@ -168,8 +165,7 @@ impl Service {
         let job = jobs
             .get(id)
             .ok_or_else(|| AppError::new("scan", "扫描任务不存在。"))?;
-        let state = job.state.lock().unwrap().clone();
-        Ok(state)
+        Ok(job.snapshot())
     }
     pub fn scan_cancel(&self, id: &str) -> Result<()> {
         let jobs = self.scans.lock().unwrap();

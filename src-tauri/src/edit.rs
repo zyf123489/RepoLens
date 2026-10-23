@@ -54,9 +54,13 @@ fn commit_changes(git: &Git, ctx: &Context, preview: &Preview) -> Result<()> {
     }
     let stage_dir = tempfile::Builder::new()
         .prefix("repolens-")
-        .tempdir_in(config.parent().unwrap())?;
+        .tempdir_in(config.parent().unwrap())
+        .map_err(|error| AppError::filesystem("创建暂存目录失败", error))?;
     let stage = stage_dir.path().join("config");
-    std::fs::write(&stage, std::fs::read(&config)?)?;
+    let original =
+        std::fs::read(&config).map_err(|error| AppError::filesystem("读取目标配置失败", error))?;
+    std::fs::write(&stage, original)
+        .map_err(|error| AppError::filesystem("写入暂存配置失败", error))?;
     std::fs::set_permissions(&stage, meta.permissions())?;
     for item in &preview.items {
         let mut args = vec![
@@ -91,7 +95,8 @@ fn commit_changes(git: &Git, ctx: &Context, preview: &Preview) -> Result<()> {
         ));
     }
     OpenOptions::new().write(true).open(&stage)?.sync_all()?;
-    std::fs::rename(&stage, &config)?;
+    std::fs::rename(&stage, &config)
+        .map_err(|error| AppError::filesystem("替换目标配置失败", error))?;
     Ok(())
 }
 
@@ -215,10 +220,47 @@ pub fn fingerprint(git: &Git, ctx: &Context) -> Result<String> {
             }
         }
     }
-    // Track include directives even when they currently contribute no identity value.
-    for key in ["include.path", "extensions.worktreeConfig"] {
-        let values = git.config(Path::new(&ctx.path), key)?;
-        hash.update(serde_json::to_vec(&values).unwrap());
+    // Track conditional and unconditional directives even when their targets
+    // contribute no identity values. Also fingerprint their source files.
+    let directives = git.query(
+        Path::new(&ctx.path),
+        &[
+            "config",
+            "--includes",
+            "--null",
+            "--show-origin",
+            "--show-scope",
+            "--get-regexp",
+            r"^(include\.path|includeif\..*\.path|extensions\.worktreeconfig)$",
+        ],
+    )?;
+    if directives.code != 0 && directives.code != 1 {
+        return Err(AppError::new(
+            "config",
+            "无法核对配置包含关系，请重新读取。",
+        ));
+    }
+    hash.update(&directives.bytes);
+    if !directives.bytes.is_empty() {
+        let Some(records) = directives.bytes.strip_suffix(&[0]) else {
+            return Err(AppError::new("config_format", "配置来源输出格式不受支持。"));
+        };
+        let parts: Vec<_> = records.split(|b| *b == 0).collect();
+        for record in parts.chunks(3) {
+            if record.len() != 3 {
+                return Err(AppError::new("config_format", "配置来源输出格式不受支持。"));
+            }
+            let origin = std::str::from_utf8(record[1])
+                .map_err(|_| AppError::new("encoding", "配置来源编码不受支持。"))?;
+            if let Some(path) = origin.strip_prefix("file:") {
+                let path = Path::new(path);
+                files.insert(if path.is_absolute() {
+                    path.into()
+                } else {
+                    Path::new(&ctx.path).join(path)
+                });
+            }
+        }
     }
     for path in files {
         hash.update(path.to_string_lossy().as_bytes());

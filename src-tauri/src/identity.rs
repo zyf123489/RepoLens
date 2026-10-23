@@ -93,20 +93,9 @@ pub fn read_module(git: &Git, cwd: &Path, policy: &Policy) -> Module<Identity> {
             "身份配置读取失败，无法完成配置检查。",
         ));
     }
-    let mut id = evaluate(keys, policy);
-    id.status = "incomplete".into();
-    for key in &failed {
-        id.findings.retain(|finding| finding.field != *key);
-        id.findings.push(Finding {
-            field: (*key).into(),
-            value: None,
-            state: "incomplete".into(),
-            reason: "此项无法读取，未将其当作缺失或匹配".into(),
-        });
-    }
     Module {
         state: "partial".into(),
-        data: Some(id),
+        data: Some(evaluate(keys, policy)),
         error: Some(AppError::new(
             "config_partial",
             &format!("部分身份配置未读取：{}", failed.join("、")),
@@ -116,6 +105,8 @@ pub fn read_module(git: &Git, cwd: &Path, policy: &Policy) -> Module<Identity> {
 }
 
 pub fn evaluate(keys: Vec<ConfigKey>, policy: &Policy) -> Identity {
+    // A present key with no values means Git confirmed it is unconfigured.
+    // An absent key was not read and must never trigger an inferred fallback.
     let get = |key: &str| {
         keys.iter()
             .find(|v| v.key == key)
@@ -126,10 +117,25 @@ pub fn evaluate(keys: Vec<ConfigKey>, policy: &Policy) -> Identity {
     let mut missing = false;
     let mut mismatch = false;
     let mut review = false;
+    let mut incomplete = false;
     for role in ["user", "author", "committer"] {
         for field in ["name", "email"] {
+            let own_key = format!("{role}.{field}");
+            let base_key = format!("user.{field}");
             let base = get(&format!("user.{field}"));
             let own = get(&format!("{role}.{field}"));
+            if !keys.iter().any(|k| k.key == own_key)
+                || (own.is_none() && !keys.iter().any(|k| k.key == base_key))
+            {
+                incomplete = true;
+                findings.push(Finding {
+                    field: own_key,
+                    value: None,
+                    state: "incomplete".into(),
+                    reason: "此项或其回退所需的基础项无法读取，未将其当作缺失或匹配".into(),
+                });
+                continue;
+            }
             let value = if role == "user" {
                 base.clone()
             } else {
@@ -190,7 +196,9 @@ pub fn evaluate(keys: Vec<ConfigKey>, policy: &Policy) -> Identity {
         }
     }
     let any = policy.name.is_some() || policy.email.is_some() || !policy.domains.is_empty();
-    let status = if mismatch {
+    let status = if incomplete {
+        "incomplete"
+    } else if mismatch {
         "mismatch"
     } else if missing {
         "missing"

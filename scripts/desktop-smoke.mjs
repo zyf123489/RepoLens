@@ -135,6 +135,64 @@ try {
   await page.getByRole('button', { name: '完成', exact: true }).click();
   await row.getByText('配置检查通过', { exact: true }).waitFor();
   passed('confirmed save writes only the selected local identity key and refreshes');
+
+  git('config', 'remote.extra.url', 'x://login:private-scheme-sentinel@example.com/repo');
+  const endpoints = await page.evaluate(async (id) => {
+    const snapshot = await window.__TAURI_INTERNALS__.invoke('read_snapshot', { id });
+    return snapshot.remotes.data;
+  }, entryId);
+  assert.ok(endpoints.some((endpoint) => endpoint.remote === 'extra' && endpoint.protocol === 'x'));
+  assert.ok(!JSON.stringify(endpoints).includes('private-scheme-sentinel'));
+  assert.ok(!JSON.stringify(endpoints).includes('login'));
+  passed('single-letter remote protocol stays redacted across actual IPC');
+
+  await page.getByRole('button', { name: '修改仓库级配置', exact: true }).click();
+  await page.getByLabel('修改提交姓名').check();
+  await page.getByLabel('新的提交姓名').fill('Smoke User 2');
+  await page.getByRole('button', { name: '预览修改', exact: true }).click();
+  await confirmation.waitFor();
+  const beforeIncludeChange = await readFile(config, 'utf8');
+  const included = path.join(root, 'empty-condition.config');
+  await writeFile(included, '');
+  git('config', '--file', global, 'includeIf.onbranch:not-main.path', included);
+  await confirmation.getByRole('button', { name: '确认保存', exact: true }).click();
+  await confirmation.getByRole('alert').waitFor();
+  assert.equal(await readFile(config, 'utf8'), beforeIncludeChange);
+  await confirmation.getByRole('button', { name: '返回', exact: true }).click();
+  assert.equal(await page.getByLabel('新的提交姓名').inputValue(), 'Smoke User 2');
+  await page.getByRole('button', { name: '预览修改', exact: true }).click();
+  await confirmation.waitFor();
+  await confirmation.getByRole('button', { name: '确认保存', exact: true }).click();
+  await page.getByRole('button', { name: '完成', exact: true }).waitFor();
+  assert.equal(git('config', '--local', 'user.name'), 'Smoke User 2');
+  assert.equal(git('config', '--local', 'user.email'), 'after@example.com');
+  await page.getByRole('button', { name: '完成', exact: true }).click();
+  await row.getByText('配置检查通过', { exact: true }).waitFor();
+  passed('inactive includeIf change rejects old preview and fresh preview saves selected key');
+
+  const validConfig = await readFile(config);
+  await writeFile(
+    config,
+    Buffer.concat([
+      validConfig,
+      Buffer.from('\n[author]\n email = '),
+      Buffer.from([0xff]),
+      Buffer.from('\n'),
+    ]),
+  );
+  await page.getByRole('button', { name: '刷新', exact: true }).click();
+  await row.getByText('无法完成配置检查', { exact: true }).waitFor();
+  await page.getByText('after@example.com', { exact: true }).first().waitFor();
+  const partial = await page.evaluate(
+    (id) => window.__TAURI_INTERNALS__.invoke('read_snapshot', { id }),
+    entryId,
+  );
+  assert.equal(partial.identity.state, 'partial');
+  assert.equal(partial.identity.data.status, 'incomplete');
+  await writeFile(config, validConfig);
+  await page.getByRole('button', { name: '刷新', exact: true }).click();
+  await row.getByText('配置检查通过', { exact: true }).waitFor();
+  passed('partial identity failure retains known values and refresh recovers after repair');
   assert.deepEqual(jsErrors, []);
   await page.screenshot({ path: path.join(root, 'saved.png') });
   await writeFile(

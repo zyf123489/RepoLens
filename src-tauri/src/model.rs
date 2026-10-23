@@ -16,6 +16,28 @@ impl AppError {
             message: message.into(),
         }
     }
+    pub fn filesystem(operation: &'static str, error: std::io::Error) -> Self {
+        use std::io::ErrorKind;
+        #[cfg(windows)]
+        if matches!(error.raw_os_error(), Some(32 | 33)) {
+            return Self::new(
+                "filesystem",
+                &format!("{operation}：文件正在使用，请稍后重试。"),
+            );
+        }
+        let reason = match error.kind() {
+            ErrorKind::NotFound => "文件或目录已不存在，请刷新后检查。",
+            ErrorKind::PermissionDenied => "权限不足，请检查访问权限。",
+            ErrorKind::AlreadyExists => "目标已存在，请检查是否发生并发操作。",
+            ErrorKind::WouldBlock => "文件暂时不可用，请稍后重试。",
+            ErrorKind::Interrupted => "操作被中断，请重试。",
+            ErrorKind::StorageFull => "存储空间不足，请释放空间后重试。",
+            ErrorKind::ReadOnlyFilesystem => "所在文件系统为只读，无法保存。",
+            _ => "文件无法访问，请检查路径和权限。",
+        };
+        // Raw OS messages and paths can contain secrets; expose only a category.
+        Self::new("filesystem", &format!("{operation}：{reason}"))
+    }
 }
 impl std::fmt::Display for AppError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -24,8 +46,8 @@ impl std::fmt::Display for AppError {
 }
 impl std::error::Error for AppError {}
 impl From<std::io::Error> for AppError {
-    fn from(_: std::io::Error) -> Self {
-        Self::new("filesystem", "文件无法访问，请检查路径和权限。")
+    fn from(error: std::io::Error) -> Self {
+        Self::filesystem("文件操作失败", error)
     }
 }
 impl From<rusqlite::Error> for AppError {

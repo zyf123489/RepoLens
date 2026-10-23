@@ -98,7 +98,10 @@ fn identity_keys(author: Option<&str>) -> Vec<ConfigKey> {
     vec![
         key("user.name", Some("User")),
         key("user.email", Some("a@company.com")),
+        key("author.name", None),
         key("author.email", author),
+        key("committer.name", None),
+        key("committer.email", None),
     ]
 }
 
@@ -121,7 +124,9 @@ fn author_mismatch_cannot_be_hidden_by_base_match() {
 }
 #[test]
 fn missing_without_rules_needs_attention() {
-    let i = identity::evaluate(vec![key("user.name", Some("User"))], &Policy::default());
+    let mut keys = identity_keys(None);
+    keys[1].values.clear();
+    let i = identity::evaluate(keys, &Policy::default());
     assert_eq!(i.status, "missing");
 }
 #[test]
@@ -180,6 +185,69 @@ fn no_rules_is_not_passed() {
         "unconfigured"
     );
 }
+
+#[test]
+fn unread_identity_keys_take_priority_without_hiding_known_mismatches() {
+    let policy = Policy {
+        email: Some("a@company.com".into()),
+        ..Default::default()
+    };
+    for unread in identity::KEYS {
+        let mut keys = identity_keys(Some("other@company.com"));
+        keys.retain(|k| k.key != unread);
+        let result = identity::evaluate(keys, &policy);
+        assert_eq!(result.status, "incomplete", "unread: {unread}");
+        assert_eq!(
+            result
+                .findings
+                .iter()
+                .find(|f| f.field == unread)
+                .unwrap()
+                .state,
+            "incomplete"
+        );
+        if unread != "author.email" {
+            assert_eq!(
+                result
+                    .findings
+                    .iter()
+                    .find(|f| f.field == "author.email")
+                    .unwrap()
+                    .state,
+                "mismatch"
+            );
+        }
+    }
+    assert_eq!(identity::evaluate(vec![], &policy).status, "incomplete");
+}
+
+#[test]
+fn confirmed_absent_overrides_inherit_but_unread_base_cannot_supply_fallback() {
+    let policy = Policy {
+        email: Some("a@company.com".into()),
+        ..Default::default()
+    };
+    let complete = identity::evaluate(identity_keys(None), &policy);
+    assert_eq!(complete.status, "passed");
+    assert_eq!(
+        complete
+            .findings
+            .iter()
+            .find(|f| f.field == "author.email")
+            .unwrap()
+            .value
+            .as_deref(),
+        Some("a@company.com")
+    );
+    let mut keys = identity_keys(None);
+    keys.retain(|k| k.key != "user.email");
+    let partial = identity::evaluate(keys, &policy);
+    for field in ["user.email", "author.email", "committer.email"] {
+        let finding = partial.findings.iter().find(|f| f.field == field).unwrap();
+        assert_eq!(finding.state, "incomplete");
+        assert!(finding.value.is_none());
+    }
+}
 #[test]
 fn status_counts_overlap_and_rename_source_is_skipped() {
     let bytes=b"1 MM N... 100644 100644 100644 a b file\0? newline\nfile\0\x32 R. N... 100644 100644 100644 a b R100 target\0source\0";
@@ -198,6 +266,75 @@ fn address_secrets_are_removed() {
         auth::redact_address("git@alias:group/repo.git"),
         "alias:group/repo.git"
     );
+}
+
+#[test]
+fn single_letter_protocols_cannot_bypass_redaction_or_claim_to_be_local_paths() {
+    let f = Fixture::new();
+    for scheme in ["x", "C"] {
+        let address = format!(
+            "{scheme}://login:private-url-sentinel@example.com/repo?token=private-url-sentinel"
+        );
+        let safe = auth::redact_address(&address);
+        assert!(!safe.contains("private-url-sentinel"));
+        assert!(!safe.contains("login"));
+        f.set("remote.origin.url", &address);
+        let endpoints = auth::read(&f.git, &f.git.discover(&f.repo).unwrap()).unwrap();
+        assert_eq!(endpoints.len(), 2);
+        assert!(endpoints.iter().all(|e| e.protocol != "local"));
+        assert!(!serde_json::to_string(&endpoints)
+            .unwrap()
+            .contains("private-url-sentinel"));
+    }
+    for address in [
+        r"C:\source repo",
+        "C:/source repo",
+        r"\\server\share\repo",
+        "git@alias:group/repo.git",
+    ] {
+        let safe = auth::redact_address(address);
+        assert!(
+            !safe.starts_with('['),
+            "normal path/SSH address must remain readable"
+        );
+    }
+}
+
+#[test]
+fn filesystem_errors_expose_categories_and_operations_without_raw_secrets() {
+    use std::io::{Error, ErrorKind};
+    for (kind, expected) in [
+        (ErrorKind::NotFound, "不存在"),
+        (ErrorKind::PermissionDenied, "权限不足"),
+        (ErrorKind::WouldBlock, "稍后重试"),
+        (ErrorKind::StorageFull, "空间不足"),
+        (ErrorKind::Other, "路径和权限"),
+    ] {
+        let error = AppError::filesystem("读取配置失败", Error::new(kind, "private-io-sentinel"));
+        assert_eq!(error.code, "filesystem");
+        assert!(error.message.contains("读取配置失败"));
+        assert!(error.message.contains(expected));
+        assert!(!serde_json::to_string(&error)
+            .unwrap()
+            .contains("private-io-sentinel"));
+    }
+    #[cfg(windows)]
+    assert!(AppError::from(Error::from_raw_os_error(32))
+        .message
+        .contains("文件正在使用"));
+}
+
+#[test]
+fn ssh_tokens_are_not_expanded_and_are_explained_without_echoing_values() {
+    let (values, limitations) = auth::parse_ssh(
+        "Host work\n IdentityFile %d/private-ssh-sentinel\n User %u\n HostName github.com\n",
+        "work",
+    );
+    assert!(!values.contains_key("identityfile"));
+    assert!(!values.contains_key("user"));
+    assert_eq!(values["hostname"], "github.com");
+    assert!(limitations.iter().any(|s| s.contains("SSH token")));
+    assert!(!limitations.join(" ").contains("private-ssh-sentinel"));
 }
 #[test]
 fn ssh_is_static_and_first_value_wins() {
@@ -246,6 +383,39 @@ fn inspect_internal_directory_and_empty_repository() {
     let c = f.git.discover(&child).unwrap();
     assert_eq!(c.kind, "normal");
     assert!(f.git.head(Path::new(&c.path)).unwrap().unborn);
+}
+
+#[test]
+fn head_distinguishes_unborn_detached_and_unreadable_states() {
+    let f = Fixture::new();
+    let unborn = f.git.head(&f.repo).unwrap();
+    assert!(unborn.unborn);
+    assert!(!unborn.detached);
+    f.commit();
+    f.cmd(&f.repo, &["checkout", "--detach"]);
+    let detached = f.git.head(&f.repo).unwrap();
+    assert!(detached.detached);
+    assert!(!detached.unborn);
+    assert!(detached.oid.is_some());
+    std::fs::write(f.repo.join(".git/HEAD"), "not a valid HEAD\n").unwrap();
+    assert!(f.git.head(&f.repo).is_err());
+}
+
+#[test]
+fn config_get_all_preserves_value_boundaries_empty_values_and_origins() {
+    let f = Fixture::new();
+    let multiline = "Name\twith\na second line";
+    f.cmd(&f.repo, &["config", "--add", "user.name", multiline]);
+    f.cmd(&f.repo, &["config", "--add", "user.name", ""]);
+    let values = f.git.config(&f.repo, "user.name").unwrap();
+    assert_eq!(
+        values.iter().map(|v| v.value.as_str()).collect::<Vec<_>>(),
+        vec!["Example User", multiline, ""]
+    );
+    assert!(values
+        .iter()
+        .all(|v| v.scope == "local" && v.origin.starts_with("file:")));
+    assert!(f.git.config(&f.repo, "committer.name").unwrap().is_empty());
 }
 #[test]
 fn bare_and_worktree_are_distinct_and_share_config() {
@@ -347,6 +517,126 @@ fn external_modification_invalidates_preview() {
             .value,
         "Example User"
     );
+}
+
+#[test]
+fn inactive_conditional_include_add_change_and_remove_invalidate_previews() {
+    for operation in ["add", "change", "remove"] {
+        let f = Fixture::new();
+        let first = f.dir.path().join("empty first.config");
+        let second = f.dir.path().join("empty second.config");
+        std::fs::write(&first, "").unwrap();
+        std::fs::write(&second, "").unwrap();
+        let declaration = "includeIf.onbranch:not-main.path";
+        if operation != "add" {
+            f.cmd(
+                &f.repo,
+                &[
+                    "config",
+                    "--file",
+                    f.global.to_str().unwrap(),
+                    declaration,
+                    first.to_str().unwrap(),
+                ],
+            );
+        }
+        let changes = || {
+            vec![Change {
+                key: "user.name".into(),
+                value: Some("Changed".into()),
+            }]
+        };
+        let preview = edit::preview(&f.git, &f.entry(), changes(), vec![]).unwrap();
+        let original = std::fs::read(f.repo.join(".git/config")).unwrap();
+        if operation == "remove" {
+            f.cmd(
+                &f.repo,
+                &[
+                    "config",
+                    "--file",
+                    f.global.to_str().unwrap(),
+                    "--unset-all",
+                    declaration,
+                ],
+            );
+        } else {
+            f.cmd(
+                &f.repo,
+                &[
+                    "config",
+                    "--file",
+                    f.global.to_str().unwrap(),
+                    declaration,
+                    second.to_str().unwrap(),
+                ],
+            );
+        }
+        assert_eq!(
+            edit::apply(&f.git, preview).unwrap_err().code,
+            "preview_stale",
+            "{operation}"
+        );
+        assert_eq!(std::fs::read(f.repo.join(".git/config")).unwrap(), original);
+        let global_after_external_change = std::fs::read(&f.global).unwrap();
+        let fresh = edit::preview(&f.git, &f.entry(), changes(), vec![]).unwrap();
+        assert_eq!(edit::apply(&f.git, fresh).unwrap().state, "applied");
+        assert_eq!(
+            std::fs::read(&f.global).unwrap(),
+            global_after_external_change
+        );
+    }
+}
+
+#[test]
+fn conditional_directive_sources_are_fingerprinted_without_identity_values() {
+    use std::io::Write;
+    let f = Fixture::new();
+    let middle = f.dir.path().join("middle.config");
+    let empty = f.dir.path().join("empty.config");
+    std::fs::write(&empty, "").unwrap();
+    std::fs::write(&middle, "").unwrap();
+    f.cmd(
+        &f.repo,
+        &[
+            "config",
+            "--file",
+            f.global.to_str().unwrap(),
+            "includeIf.onbranch:main.path",
+            middle.to_str().unwrap(),
+        ],
+    );
+    f.cmd(
+        &f.repo,
+        &[
+            "config",
+            "--file",
+            middle.to_str().unwrap(),
+            "includeIf.onbranch:not-main.path",
+            empty.to_str().unwrap(),
+        ],
+    );
+    let preview = edit::preview(
+        &f.git,
+        &f.entry(),
+        vec![Change {
+            key: "user.name".into(),
+            value: Some("Changed".into()),
+        }],
+        vec![],
+    )
+    .unwrap();
+    let original = std::fs::read(f.repo.join(".git/config")).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&middle)
+        .unwrap()
+        .write_all(b"\n[repolens-test]\n marker = changed\n")
+        .unwrap();
+    assert_eq!(
+        edit::apply(&f.git, preview).unwrap_err().code,
+        "preview_stale"
+    );
+    assert_eq!(std::fs::read(f.repo.join(".git/config")).unwrap(), original);
 }
 #[test]
 fn removal_keeps_included_configuration() {
@@ -472,6 +762,32 @@ fn store_remove_keeps_repository_and_policies_are_independent() {
     assert!(store.entry(&e.id).unwrap().policy.email.is_some());
     store.remove(&e.id).unwrap();
     assert!(f.repo.join(".git/config").exists());
+}
+
+#[test]
+fn single_entry_lookup_is_not_blocked_by_an_unrelated_corrupt_policy() {
+    let f = Fixture::new();
+    let store = Store::open(&f.dir.path().join("data")).unwrap();
+    let entry = store.add(&f.git.discover(&f.repo).unwrap()).unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT INTO entries VALUES('corrupt','other-path','',NULL,'normal','not json')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(store.entry(&entry.id).unwrap().path, entry.path);
+    assert_eq!(store.entry("corrupt").unwrap_err().code, "policy_data");
+    assert_eq!(store.entry("absent").unwrap_err().code, "entry");
+    // Listing must still report corruption rather than silently discard a record.
+    assert_eq!(store.entries().unwrap_err().code, "policy_data");
+    assert_eq!(
+        store
+            .update(&entry.id, "Alias", &None, &Policy::default())
+            .unwrap()
+            .alias,
+        "Alias"
+    );
 }
 #[test]
 fn scan_depth_exclusions_nested_and_no_auto_collect() {

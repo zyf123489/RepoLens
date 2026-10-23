@@ -5,15 +5,20 @@ use std::{
 };
 use url::Url;
 
+fn windows_absolute_path(raw: &str) -> bool {
+    raw.len() > 2
+        && raw.as_bytes()[0].is_ascii_alphabetic()
+        && raw.as_bytes()[1] == b':'
+        && matches!(raw.as_bytes()[2], b'/' | b'\\')
+        // A single-letter URL scheme must still pass through URL redaction.
+        && !raw[2..].starts_with("//")
+}
+
 pub fn redact_address(raw: &str) -> String {
     if raw.chars().any(char::is_control) {
         return "[地址无法安全展示]".into();
     }
-    if raw.len() > 2
-        && raw.as_bytes()[0].is_ascii_alphabetic()
-        && raw.as_bytes()[1] == b':'
-        && matches!(raw.as_bytes()[2], b'/' | b'\\')
-    {
+    if windows_absolute_path(raw) {
         return raw.split(['?', '#']).next().unwrap_or("").into();
     }
     if let Ok(mut url) = Url::parse(raw) {
@@ -46,11 +51,11 @@ pub fn redact_address(raw: &str) -> String {
     clean.into()
 }
 fn address_parts(raw: &str) -> (String, String, Option<String>) {
+    if windows_absolute_path(raw) {
+        return ("local".into(), String::new(), None);
+    }
     if let Ok(url) = Url::parse(raw) {
         let scheme = url.scheme();
-        if raw.len() > 2 && raw.as_bytes()[1] == b':' && raw.as_bytes()[0].is_ascii_alphabetic() {
-            return ("local".into(), String::new(), None);
-        }
         return (
             scheme.into(),
             url.host_str().unwrap_or("").into(),
@@ -356,7 +361,9 @@ pub fn parse_ssh(text: &str, host: &str) -> (HashMap<String, String>, Vec<String
         }
         if ["hostname", "port", "user", "identityfile", "identitiesonly"].contains(&key.as_str()) {
             if value.contains(['%', '$', '"', '\'', '#']) || !valid_text(value, 1024) {
-                limitations.push(format!("{key} 含未支持的展开或引号语法。"));
+                limitations.push(format!(
+                    "{key} 含未支持的 SSH token（如 %d、%u）、环境变量展开或引号/注释语法。"
+                ));
                 continue;
             }
             if key == "identityfile" && values.contains_key(&key) {

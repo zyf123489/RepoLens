@@ -228,6 +228,8 @@ impl Git {
                 "身份或认证配置无法解析，请检查 Git 配置语法。",
             ));
         }
+        // --get-all emits scope\0origin\0value\0 with these flags; it does
+        // not include the key. --get-regexp instead emits key\nvalue last.
         let parts: Vec<_> = out.bytes.split(|b| *b == 0).collect();
         let mut values = Vec::new();
         for chunk in parts[..parts.len().saturating_sub(1)].chunks(3) {

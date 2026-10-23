@@ -4,22 +4,22 @@
 
 ## 已完成验证
 
-| 检查                        | 结果                                                                                                          |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Rust 核心/真实 Git 集成测试 | 35 项通过；全部使用临时仓库与隔离 Git 配置                                                                    |
-| 前端业务展示/筛选测试       | 6 项通过，TypeScript 严格检查通过                                                                             |
-| Rust Clippy                 | 桌面 feature、全部 targets、`-D warnings` 通过                                                                |
-| 前端生产构建                | 通过；本地资源，无外部字体/脚本                                                                               |
-| Windows Release 与 NSIS     | 构建通过；实际桌面首页启动并读取本机 Git 版本                                                                 |
-| 实际桌面 WebView2/IPC 流程  | 扫描不自动收录、添加读取、认证脱敏、规则检查、只读预览、取消/过期上下文拒绝、确认保存与刷新通过；脚本错误为零 |
+| 检查                        | 结果                                                                                                                      |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Rust 核心/真实 Git 集成测试 | 48 项通过（45 项业务/隔离 Git 集成 + 3 项扫描故障注入单元测试）；不修改个人 Git 全局配置                                  |
+| 前端业务展示/筛选测试       | 10 项通过，TypeScript 严格检查通过                                                                                        |
+| Rust Clippy                 | 桌面 feature、全部 targets、`-D warnings` 通过                                                                            |
+| 前端生产构建                | 通过；本地资源，无外部字体/脚本                                                                                           |
+| Windows Release 与 NSIS     | 构建通过；实际桌面首页启动并读取本机 Git 版本                                                                             |
+| 实际桌面 WebView2/IPC 流程  | 10 段通过：原有 7 段，以及单字母协议脱敏、条件 include 变化拒绝旧预览并重新预览保存、部分身份读取失败后恢复；脚本错误为零 |
 
 桌面自动化使用 `scripts/desktop-smoke.mjs`，真实运行 Release 程序，设置隔离的全局 Git 配置与单独 WebView2 测试目录；未模拟 IPC。只创建/修改样例仓库，结束后通过后端移除该样例的收录记录。桌面宿主需要交互式 Windows 会话；在非交互工具会话中 WebView2 调试端点未就绪，切换至用户桌面会话后台启动后通过。没有使用前台键鼠接管。
 
-此次完整桌面证据位于 `artifacts/smoke-1792751935040/`，含 `result.json`、身份页、确认预览与保存后截图。`artifacts/desktop-smoke.log` 记录七段通过结果。该目录包含人为创建的测试配置，仅作为本地测试证据，不纳入发行包。
+本轮审查修复后的完整桌面证据位于 `artifacts/smoke-1792759303873/`，含 `result.json`、身份页、确认预览与保存后截图。`artifacts/desktop-smoke.log` 记录十段通过结果。该目录包含人为创建的测试配置，仅作为本地测试证据，不纳入发行包；修复范围与各项回溯见 [修复记录](REVIEW-FIXES.md)。
 
 回归覆盖：空仓库、中文/空格路径、bare、linked worktree、已初始化子模块、include/条件 include、作者覆盖、显式空覆盖、冲突规则、重名直接配置、外部变更、现有 Git 锁、配置移除与 include 保留、worktree 覆盖不被改写、局部身份读取失败、无规则状态、重命名计数、助手顺序/重置/作用域、URL 秘密脱敏、不执行 fsmonitor、读取不改 config/index/refs/工作区，以及缺失 promisor 对象不会被自动获取。
 
-## 性能基线
+## 性能基线（本轮修复前）
 
 测试机：Windows 10 Pro 22H2，build 19045.6466；Intel Core i5-14400；系统报告物理内存 34,008,203,264 字节（约 31.67 GiB）；磁盘 YMTC YMSS2EB08B66MC；Git 2.55.0.windows.1。Rust 1.99.1，Node 24.18.0。硬件信息在测量后补采，测试期间另有开发/构建任务，结果仅为初步基线。
 
@@ -39,17 +39,17 @@
 
 | 产物             | 路径                                                                        | 大小                          |
 | ---------------- | --------------------------------------------------------------------------- | ----------------------------- |
-| Windows x64 程序 | `src-tauri/target/release/repolens.exe`                                     | 12,060,672 字节               |
-| Windows x64 NSIS | `src-tauri/target/release/bundle/nsis/RepoLens_0.1.0-alpha.1_x64-setup.exe` | 3,010,599 字节（约 2.87 MiB） |
+| Windows x64 程序 | `src-tauri/target/release/repolens.exe`                                     | 12,023,808 字节               |
+| Windows x64 NSIS | `src-tauri/target/release/bundle/nsis/RepoLens_0.1.0-alpha.1_x64-setup.exe` | 3,008,140 字节（约 2.87 MiB） |
 
 SHA-256：
 
 ```text
 repolens.exe
-4089A8FFD27BD41F8BE7BDABA6F7FCFD2A63395DC309DA055E29A552F9DF0849
+6950904CA20A0B98070609DEF40F1F4C9113BEEB87889AEF6A06021A803B5422
 
 RepoLens_0.1.0-alpha.1_x64-setup.exe
-E9B0770F04D5E6D228281CFE52F9D4C7663B29784F7262F1AE5B3EFD8431D36B
+3A31B94F269BB7C706455547AF0F666D100739872637C594E99F21562A9D1CC0
 ```
 
 安装包大小不含机器上已有的 Git/WebView2/系统组件。Tauri 的 NSIS 安装器可处理缺失的 WebView2 运行时，但该依赖安装路径尚未在干净系统验证。
@@ -63,6 +63,6 @@ E9B0770F04D5E6D228281CFE52F9D4C7663B29784F7262F1AE5B3EFD8431D36B
 | macOS 12+ x64 / ARM64 | 本机 Git；系统 WebKit    | app / dmg 目标      | 源码与配置已准备；未构建、未签名/公证、未验收                        |
 | Ubuntu 22.04+ x64     | 本机 Git；WebKitGTK 4.1  | deb / AppImage 目标 | 源码与配置已准备；未构建、未验收                                     |
 
-`.github/workflows/check.yml` 提供 Windows/macOS/Linux 检查与无打包 Release 构建任务，尚未在托管 CI 实际运行。它不能代替安装包和最低 OS 验证。
+`.github/workflows/check.yml` 提供 Windows/macOS/Linux 检查与无打包 Release 构建任务；本轮未核对托管 CI 的运行结果，不能将本地通过视为三平台通过。它不能代替安装包和最低 OS 验证。
 
 正式发布前仍须关闭：独立环境安装/卸载与应用数据保留；Git/WebView 缺失、版本不足与信任提示；其他 OS/架构实机流程；签名/公证；完整性能测量及阈值；许可证与正式版本。对 §11.3 的 HTTPS 候选用户名保守隐藏、SSH/部分凭据 URL 作用域解析限制，也需按实际能力写入正式版说明。

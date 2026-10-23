@@ -1157,6 +1157,8 @@ export default function App() {
                   <span>
                     {scan.state === 'running' ? (
                       <LoaderCircle className="spin" size={15} />
+                    ) : scan.state === 'failed' ? (
+                      <CircleAlert size={15} />
                     ) : (
                       <CheckCircle2 size={15} />
                     )}{' '}
@@ -1164,7 +1166,9 @@ export default function App() {
                       ? '扫描中'
                       : scan.state === 'cancelled'
                         ? '扫描已停止'
-                        : '扫描完成'}
+                        : scan.state === 'failed'
+                          ? '扫描异常结束，已保留发现结果'
+                          : '扫描完成'}
                   </span>
                   <span>
                     已访问 {scan.visited} 个目录 · 发现 {scan.found.length} 个仓库
