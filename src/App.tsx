@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import {
   Activity,
   ArrowLeft,
-  ArrowUpRight,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -13,7 +12,6 @@ import {
   FolderGit2,
   FolderPlus,
   GitBranch,
-  Layers,
   LoaderCircle,
   Plus,
   RefreshCw,
@@ -52,6 +50,16 @@ import {
   statusLabels,
 } from './view';
 
+const statusTips: Record<string, string> = {
+  passed: '所有已启用的身份规则均满足',
+  mismatch: '至少一项身份配置不符合期望规则',
+  missing: '基础姓名或邮箱缺失',
+  review: '检测到不同的覆盖配置，但未设置对应规则',
+  incomplete: '部分身份配置无法读取，检查结果不完整',
+  unconfigured: '已配置身份但未设置期望规则',
+  loading: '正在读取仓库信息',
+  unavailable: '尚未读取仓库信息',
+};
 function Badge({ state, children }: { state: string; children?: ReactNode }) {
   const good = state === 'passed' || state === 'match' || state === 'applied';
   const warning = [
@@ -65,7 +73,10 @@ function Badge({ state, children }: { state: string; children?: ReactNode }) {
     'partial',
   ].includes(state);
   return (
-    <span className={`badge ${good ? 'good' : warning ? 'warning' : 'neutral'}`}>
+    <span
+      className={`badge ${good ? 'good' : warning ? 'warning' : 'neutral'}`}
+      title={statusTips[state] || ''}
+    >
       {good ? (
         <CheckCircle2 size={12} />
       ) : warning ? (
@@ -154,7 +165,24 @@ function ConfigSource({ config }: { config: ConfigKey }) {
             {i === config.values.length - 1 ? <Check size={13} /> : <ChevronRight size={13} />}
           </span>
           <div>
-            <span className="scope">{v.scope}</span>
+            <span
+              className="scope"
+              title={
+                v.scope === 'local'
+                  ? '仓库级配置，仅影响此仓库'
+                  : v.scope === 'global'
+                    ? '用户全局配置，影响所有仓库'
+                    : v.scope === 'system'
+                      ? '系统级配置，影响所有用户'
+                      : v.scope === 'worktree'
+                        ? '工作树专属配置'
+                        : v.scope === 'command'
+                          ? '命令行参数覆盖'
+                          : v.scope
+              }
+            >
+              {v.scope}
+            </span>
             <span>{v.value || '显式空值'}</span>
             <small>{v.origin}</small>
           </div>
@@ -294,6 +322,34 @@ export default function App() {
       }),
     [entries, snapshots, query, view, kind, identityFilter, workFilter],
   );
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (dialog || preview || writeResult) return;
+      if (e.key === 'Escape' && selected) {
+        setSelected(undefined);
+        return;
+      }
+      if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && filtered.length > 0) {
+        e.preventDefault();
+        const current = filtered.findIndex((f) => f.id === selected);
+        const next =
+          e.key === 'ArrowDown'
+            ? current < filtered.length - 1
+              ? current + 1
+              : 0
+            : current > 0
+              ? current - 1
+              : filtered.length - 1;
+        setSelected(filtered[next].id);
+        setTab('overview');
+        document
+          .querySelector(`.repo-table tbody tr:nth-child(${next + 1})`)
+          ?.scrollIntoView({ block: 'nearest' });
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [selected, filtered, dialog, preview, writeResult]);
   const entry = entries.find((e) => e.id === selected);
   const snapshot = selected ? snapshots[selected] : undefined;
   const attention = entries.filter((e) => needsCheck(snapshots[e.id])).length;
@@ -360,15 +416,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark">
-            <Layers size={21} />
-          </span>
-          <span>
-            RepoLens<small>LOCAL GIT WORKSPACE</small>
-          </span>
-        </div>
-        <div className="workspace-label">工作台</div>
+        <div className="workspace-label" style={{marginTop: 4}}>工作台</div>
         <nav aria-label="仓库导航">
           <button className={view === 'all' ? 'nav active' : 'nav'} onClick={() => setView('all')}>
             <FolderGit2 size={17} />
@@ -430,12 +478,6 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="offline-card">
-            <span className="status-dot" />
-            <div>
-              本地工作模式<small>默认离线 · 不自动同步</small>
-            </div>
-          </div>
           <button
             className="nav"
             onClick={() => {
@@ -444,8 +486,9 @@ export default function App() {
             }}
           >
             <Settings2 size={17} />
-            设置<span>{diagnostics?.version || 'alpha'}</span>
+            设置
           </button>
+          <small className="sidebar-version">RepoLens {diagnostics?.version || '0.1.0-alpha.1'}</small>
         </div>
       </aside>
       <main className="main">
@@ -455,20 +498,9 @@ export default function App() {
             <ChevronRight size={13} />
             <strong>{title}</strong>
           </div>
-          <span className="local-chip">
-            <span className="status-dot" />
-            仅本地读取
-          </span>
         </header>
         <section className="page-intro">
-          <div>
-            <div className="eyebrow">REPOSITORY WORKSPACE</div>
-            <h1>
-              {title}
-              <span>{entries.length}</span>
-            </h1>
-            <p>看清每个仓库的状态，让提交配置符合你的期望。</p>
-          </div>
+          <h1>{title}<span>{entries.length}</span></h1>
           <div className="intro-actions">
             <button
               className="button"
@@ -519,37 +551,12 @@ export default function App() {
             <button onClick={() => setMessage('')}>关闭</button>
           </div>
         )}
-        <div className="summary-grid">
-          <div className="summary-card">
-            <span>
-              <FolderGit2 size={16} />
-              已收录条目
-            </span>
-            <strong>
-              {entries.length}
-              <small>个本地仓库 / 工作树</small>
-            </strong>
-          </div>
-          <div className="summary-card">
-            <span>
-              <CheckCircle2 size={16} />
-              配置检查通过
-            </span>
-            <strong>
-              {passed}
-              <small>仅评价已检查配置</small>
-            </strong>
-          </div>
-          <div className="summary-card">
-            <span>
-              <CircleAlert size={16} />
-              需要检查
-            </span>
-            <strong className={attention ? 'amber' : ''}>
-              {attention}
-              <small>缺失、不匹配或待核实</small>
-            </strong>
-          </div>
+        <div className="summary-strip">
+          <span>收录 <strong>{entries.length}</strong></span>
+          <span className="separator">|</span>
+          <span>通过 <strong>{passed}</strong></span>
+          <span className="separator">|</span>
+          <span className={attention ? 'amber' : ''}>待检查 <strong>{attention}</strong></span>
         </div>
         <section className="repository-panel">
           <div className="toolbar">
@@ -718,54 +725,50 @@ export default function App() {
               </table>
               {filtered.length === 0 && (
                 <div className="empty-state">
-                  <span className="empty-icon">
-                    <FolderGit2 size={35} />
-                  </span>
-                  <h2>{entries.length ? '没有符合条件的仓库' : '把你的仓库放在同一个工作台'}</h2>
-                  <p>
-                    {entries.length
-                      ? '调整搜索或筛选条件，查看其他仓库。'
-                      : '添加一个仓库，或扫描项目目录，开始检查提交配置。'}
-                  </p>
                   {entries.length ? (
-                    <button
-                      className="button"
-                      onClick={() => {
-                        setQuery('');
-                        setKind('');
-                        setIdentityFilter('');
-                        setWorkFilter('');
-                        setView('all');
-                      }}
-                    >
-                      查看全部仓库
-                    </button>
+                    <>
+                      <p className="muted">没有符合条件的仓库</p>
+                      <button
+                        className="button"
+                        onClick={() => {
+                          setQuery('');
+                          setKind('');
+                          setIdentityFilter('');
+                          setWorkFilter('');
+                          setView('all');
+                        }}
+                      >
+                        清除筛选，查看全部
+                      </button>
+                    </>
                   ) : (
-                    <div>
-                      <button className="button primary" onClick={() => setDialog('add')}>
-                        <FolderPlus size={16} />
-                        添加第一个仓库
-                      </button>
-                      <button className="text-button" onClick={() => setDialog('scan')}>
-                        扫描目录
-                        <ArrowUpRight size={14} />
-                      </button>
-                    </div>
+                    <>
+                      <h2>检查你的 Git 提交身份</h2>
+                      <p>
+                        不同仓库可能配置了不同的提交姓名和邮箱。
+                        <br />
+                        添加仓库后，RepoLens 会读取配置并检查是否符合你的期望。
+                      </p>
+                      <div className="empty-actions">
+                        <button className="button primary" onClick={() => setDialog('scan')}>
+                          <ScanSearch size={15} />
+                          扫描项目目录
+                        </button>
+                        <button className="button" onClick={() => setDialog('add')}>
+                          <FolderPlus size={15} />
+                          添加单个仓库
+                        </button>
+                      </div>
+                      <small>只读取本地配置，不联网，不修改仓库。修改前由你预览和确认。</small>
+                    </>
                   )}
-                  <div className="empty-assurance">
-                    <ShieldCheck size={14} />
-                    默认只读检查，修改前由你确认
-                  </div>
                 </div>
               )}
             </div>
             {entry && (
               <aside className="detail">
                 <div className="detail-heading">
-                  <div>
-                    <span className="eyebrow">REPOSITORY DETAILS</span>
-                    <h2>{entryName(entry)}</h2>
-                  </div>
+                  <h2>{entryName(entry)}</h2>
                   <button
                     className="icon-button"
                     aria-label="关闭详情"
@@ -1000,7 +1003,7 @@ export default function App() {
           </span>
           <span>
             {diagnostics?.gitVersion || '本机 Git'}
-            <span className="separator">|</span>不会自动 fetch / pull / push
+            <span className="separator">|</span>本地模式
           </span>
         </footer>
       </main>
