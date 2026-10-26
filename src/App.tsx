@@ -416,7 +416,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="workspace-label" style={{marginTop: 4}}>工作台</div>
+        <div className="workspace-label">工作台</div>
         <nav aria-label="仓库导航">
           <button className={view === 'all' ? 'nav active' : 'nav'} onClick={() => setView('all')}>
             <FolderGit2 size={17} />
